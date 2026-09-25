@@ -8,63 +8,11 @@ permissions:
 
 env:
   APP_NAME: AndroidPocketTerm
-  APP_PACKAGE: com.k1llagt.androidpocketterm
+  APP_PACKAGE: com.t3rmux   # must stay exactly 10 characters, like com.termux
 
 jobs:
-  bootstrap:
-    name: Bootstrap (${{ matrix.arch }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [aarch64, arm, i686, x86_64]
-    steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          df -h /
-
-      - name: Clone termux-packages (latest official bootstrap snapshot)
-        run: |
-          TAG="$(git ls-remote --tags https://github.com/termux/termux-packages 'bootstrap-*' \
-            | grep -v '\^{}' | awk -F/ '{print $3}' | grep -E 'apt[.-]android-7$' | sort -V | tail -1)"
-          [ -n "$TAG" ] || { echo "No bootstrap tag found"; exit 1; }
-          echo "Using termux-packages tag: $TAG"
-          git clone --depth 1 --branch "$TAG" https://github.com/termux/termux-packages.git
-
-      - name: Skip nsenter (needs root, and breaks with the Android headers)
-        working-directory: termux-packages
-        run: echo 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" --disable-nsenter"' >> packages/util-linux/build.sh
-
-      - name: Set package name
-        working-directory: termux-packages
-        run: |
-          sed -i -E "s/^(TERMUX_APP__PACKAGE_NAME|TERMUX_APP_PACKAGE)=\"com\.termux\"/\1=\"${APP_PACKAGE}\"/" scripts/properties.sh
-          grep -n "${APP_PACKAGE}" scripts/properties.sh
-
-      - name: Build bootstrap (compiles everything for the new prefix)
-        working-directory: termux-packages
-        run: |
-          # The newest builder image locks /home/builder/lib and its sudo can't switch users,
-          # so install this snapshot's NDK and SDK inside the (writable) repo folder instead.
-          NDKV="$(grep -oP 'TERMUX_NDK_VERSION_NUM:="\K[0-9]+' scripts/properties.sh)"
-          SDKR="$(grep -oP '^TERMUX_SDK_REVISION=\K[0-9]+' scripts/properties.sh)"
-          export TERMUX_DOCKER_EXEC_EXTRA_ARGS="--env NDK=/home/builder/termux-packages/build-tools/android-ndk-r$NDKV --env ANDROID_HOME=/home/builder/termux-packages/build-tools/android-sdk-$SDKR"
-          echo "NDK r$NDKV, SDK $SDKR"
-          ./scripts/run-docker.sh ./scripts/setup-android-sdk.sh
-          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures ${{ matrix.arch }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bootstrap-${{ matrix.arch }}
-          path: termux-packages/bootstrap-${{ matrix.arch }}.zip
-          if-no-files-found: error
-
   apk:
     name: Build and sign APK
-    needs: bootstrap
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -73,19 +21,29 @@ jobs:
       - name: Clone termux-app
         run: git clone --depth 1 https://github.com/termux/termux-app.git
 
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: bootstrap-*
-          merge-multiple: true
-          path: termux-app/app/src/main/cpp
-
-      - name: Rebrand
-        run: bash rebrand.sh "$APP_NAME" "$APP_PACKAGE" termux-app
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Rebrand app
+        run: bash rebrand.sh "$APP_NAME" "$APP_PACKAGE" termux-app
+
+      - name: Download official bootstraps
+        working-directory: termux-app
+        run: ./gradlew :app:downloadBootstraps --no-daemon
+
+      - name: Patch bootstraps to the new package name
+        run: python3 patch_bootstrap.py termux-app/app/src/main/cpp com.termux "$APP_PACKAGE"
+
+      - name: Point the build at the patched bootstraps
+        working-directory: termux-app
+        run: |
+          for arch in aarch64 arm i686 x86_64; do
+            sha="$(sha256sum "app/src/main/cpp/bootstrap-$arch.zip" | cut -d' ' -f1)"
+            sed -i -E "s/(downloadBootstrap\(\"$arch\",[[:space:]]*\")[0-9a-f]{64}/\1$sha/g" app/build.gradle
+            echo "$arch $sha"
+          done
 
       - name: Build APKs
         working-directory: termux-app
@@ -117,7 +75,7 @@ jobs:
       - name: Package modified source (GPLv3)
         run: |
           tar --exclude='build' --exclude='.gradle' --exclude='.git' \
-            -czf out/androidpocketterm-source.tar.gz termux-app rebrand.sh .github
+            -czf out/androidpocketterm-source.tar.gz termux-app rebrand.sh patch_bootstrap.py .github LICENSE
 
       - name: Publish release
         env:
@@ -125,5 +83,4 @@ jobs:
         run: |
           gh release create "build-${{ github.run_number }}" out/* \
             --title "$APP_NAME build ${{ github.run_number }}" \
-            --notes "Rebranded build of termux/termux-app + termux/termux-packages (master) as $APP_PACKAGE. Licensed GPLv3; full modified source attached."
-
+            --notes "Termux (termux/termux-app master + official bootstraps) rebranded as $APP_PACKAGE. GPLv3; modified source attached."
