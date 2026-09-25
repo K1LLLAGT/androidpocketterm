@@ -26,8 +26,17 @@ jobs:
           sudo docker image prune --all --force
           df -h /
 
-      - name: Clone termux-packages
-        run: git clone --depth 1 https://github.com/termux/termux-packages.git
+      - name: Clone termux-packages (latest official bootstrap snapshot)
+        run: |
+          TAG="$(git ls-remote --tags https://github.com/termux/termux-packages 'bootstrap-*' \
+            | grep -v '\^{}' | awk -F/ '{print $3}' | grep -E 'apt[.-]android-7$' | sort -V | tail -1)"
+          [ -n "$TAG" ] || { echo "No bootstrap tag found"; exit 1; }
+          echo "Using termux-packages tag: $TAG"
+          git clone --depth 1 --branch "$TAG" https://github.com/termux/termux-packages.git
+
+      - name: Skip nsenter (needs root, and breaks with the Android headers)
+        working-directory: termux-packages
+        run: echo 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" --disable-nsenter"' >> packages/util-linux/build.sh
 
       - name: Set package name
         working-directory: termux-packages
