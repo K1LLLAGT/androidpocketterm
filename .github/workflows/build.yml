@@ -46,7 +46,15 @@ jobs:
 
       - name: Build bootstrap (compiles everything for the new prefix)
         working-directory: termux-packages
-        run: ./scripts/run-docker.sh sudo chown builder /home/builder/lib && ./scripts/run-docker.sh ./scripts/setup-android-sdk.sh && ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures ${{ matrix.arch }}
+        run: |
+          # The newest builder image locks /home/builder/lib and its sudo can't switch users,
+          # so install this snapshot's NDK and SDK inside the (writable) repo folder instead.
+          NDKV="$(grep -oP 'TERMUX_NDK_VERSION_NUM:="\K[0-9]+' scripts/properties.sh)"
+          SDKR="$(grep -oP '^TERMUX_SDK_REVISION=\K[0-9]+' scripts/properties.sh)"
+          export TERMUX_DOCKER_EXEC_EXTRA_ARGS="--env NDK=/home/builder/termux-packages/build-tools/android-ndk-r$NDKV --env ANDROID_HOME=/home/builder/termux-packages/build-tools/android-sdk-$SDKR"
+          echo "NDK r$NDKV, SDK $SDKR"
+          ./scripts/run-docker.sh ./scripts/setup-android-sdk.sh
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -118,3 +126,4 @@ jobs:
           gh release create "build-${{ github.run_number }}" out/* \
             --title "$APP_NAME build ${{ github.run_number }}" \
             --notes "Rebranded build of termux/termux-app + termux/termux-packages (master) as $APP_PACKAGE. Licensed GPLv3; full modified source attached."
+
